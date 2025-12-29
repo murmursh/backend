@@ -49,9 +49,15 @@ interface Outbound {
     mux?: unknown;
 }
 
+interface Routing {
+    rules: unknown[];
+}
+
 interface XrayJsonConfig {
     remarks: string;
+    routing?: Routing;
     outbounds: Outbound[];
+    ruleOverrideTemplates?: string[];
     meta?: {
         serverDescription?: string;
     };
@@ -77,30 +83,74 @@ export class XrayJsonGeneratorService {
 
             const templateContent = templateContentDb as unknown as XrayJsonConfig;
 
-            const templatedOutbounds: XrayJsonConfig[] = [];
+            const ruleOverrides = templateContent.ruleOverrideTemplates || [];
 
-            for (const host of hosts) {
-                if (!host) {
-                    continue;
-                }
+            const ruleOverrideTemplates: XrayJsonConfig[] = [];
 
-                const templatedOutbound = this.createConfigForHost(host, isHapp);
-                if (templatedOutbound) {
-                    templatedOutbounds.push(templatedOutbound);
+            if (ruleOverrides.length > 0) {
+                for (const ruleOverrideTemplateName of ruleOverrides) {
+                    const ruleOverrideTemplateDb = await this.subscriptionTemplateService.getCachedTemplateByType(
+                        'XRAY_JSON',
+                        ruleOverrideTemplateName,
+                    );
+
+                    if (ruleOverrideTemplateDb) {
+                        const ruleOverrideTemplate =
+                            ruleOverrideTemplateDb as unknown as XrayJsonConfig;
+                        ruleOverrideTemplates.push(ruleOverrideTemplate);
+                    }
                 }
             }
 
-            const preparedXrayJsonConfig: XrayJsonConfig[] = [];
-            for (const templatedOutbound of templatedOutbounds) {
-                preparedXrayJsonConfig.push({
+
+            const templatedOutbounds: XrayJsonConfig[] = [];
+
+            const validHosts = hosts.filter((host) => host);
+
+            const templatedOutbound = this.createConfigForHosts(validHosts, isHapp);
+            if (templatedOutbound) {
+                templatedOutbounds.push(templatedOutbound);
+            }
+            else {
+                return '';
+            }
+
+
+            // for (const templatedOutbound of templatedOutbounds) {
+            //     preparedXrayJsonConfig.push({
+            //         ...templateContent,
+            //         outbounds: [...templatedOutbound.outbounds, ...templateContent.outbounds],
+            //         remarks: templatedOutbound.remarks,
+            //         meta: templatedOutbound.meta,
+            //     });
+            // }
+            const preparedXrayJsonConfigs: XrayJsonConfig[] = [];
+            const preparedXrayJsonConfig: XrayJsonConfig = {
                     ...templateContent,
                     outbounds: [...templatedOutbound.outbounds, ...templateContent.outbounds],
                     remarks: templatedOutbound.remarks,
                     meta: templatedOutbound.meta,
-                });
-            }
+                };
 
-            return this.renderConfigs(preparedXrayJsonConfig);
+            // for each rule override copy config(at 0 for now); extend rule list of copy; add copy to result list(preparedXrayJsonConfig)
+            for (const ruleOverrideTemplate of ruleOverrideTemplates) {
+                const extendedConfig: XrayJsonConfig = {
+                    ...preparedXrayJsonConfig,
+                    routing: {
+                        ...preparedXrayJsonConfig.routing,
+                        rules: [
+                            ...(ruleOverrideTemplate.routing?.rules || []),
+                            ...(preparedXrayJsonConfig.routing?.rules || []),
+                        ],
+                    },
+                    remarks: `${preparedXrayJsonConfig.remarks} - ${ruleOverrideTemplate.remarks}`,
+                };
+                preparedXrayJsonConfigs.push(extendedConfig);
+            }
+            if (ruleOverrides.length == 0) {
+                preparedXrayJsonConfigs.push(preparedXrayJsonConfig);
+            }
+            return this.renderConfigs(preparedXrayJsonConfigs);
         } catch (error) {
             this.logger.error('Error generating xray-json config:', error);
             return '';
@@ -138,6 +188,48 @@ export class XrayJsonGeneratorService {
                     serverDescription: Buffer.from(host.serverDescription, 'base64').toString(),
                 };
             }
+
+            return config;
+        } catch (error) {
+            this.logger.error('Error creating config for host:', error);
+            return null;
+        }
+    }
+
+    private createConfigForHosts(hosts: IFormattedHost[], isHapp: boolean): XrayJsonConfig | null {
+        try {
+            const outbounds: Outbound[] = [];
+            
+            for (const host of hosts) {
+                const mainOutbound: Outbound = {
+                    tag: host.remark,
+                    protocol: host.protocol,
+                    settings: this.createOutboundSettings(host),
+                    streamSettings: this.createStreamSettings(host),
+                };
+                if (
+                    host.muxParams !== null &&
+                    host.muxParams !== undefined &&
+                    Object.keys(host.muxParams).length > 0
+                ) {
+                    mainOutbound.mux = host.muxParams;
+                }
+                outbounds.push(mainOutbound);
+            }
+
+
+
+            const config: XrayJsonConfig = {
+                remarks: 'dev build', //host.remark,
+                outbounds: outbounds,
+            };
+
+            // if (isHapp && host.serverDescription) {
+            //     config.meta = {
+            //         serverDescription: Buffer.from(host.serverDescription, 'base64').toString(),
+            //     };
+            // }
+            // hell nah i dont care about happ serverDescription
 
             return config;
         } catch (error) {
